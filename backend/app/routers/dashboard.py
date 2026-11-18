@@ -1,6 +1,7 @@
 from __future__ import annotations
 from fastapi import APIRouter
 from app.db import connect
+from app.services.axis import AXIS_LABELS, get_axis
 from app.services.gate import is_sealed
 
 router = APIRouter(tags=["dashboard"])
@@ -19,11 +20,18 @@ def dashboard():
             (day,),
         ).fetchone()
         pending = 0
+        drift = 0
         if batch:
+            # 总览差额计数与批次轴口径联动：只数主差额桶未决；旁证桶单列不混
             pending = conn.execute(
-                "SELECT COUNT(*) c FROM variance_rows WHERE batch_id=? AND fate='pending'",
+                "SELECT COUNT(*) c FROM variance_rows WHERE batch_id=? AND bucket='main' AND fate='pending'",
                 (batch["id"],),
             ).fetchone()["c"]
+            drift = conn.execute(
+                "SELECT COUNT(*) c FROM variance_rows WHERE batch_id=? AND bucket<>'main'",
+                (batch["id"],),
+            ).fetchone()["c"]
+        current_axis = get_axis(conn)
         return {
             "dock_day": day,
             "sealed": is_sealed(conn, day),
@@ -32,6 +40,9 @@ def dashboard():
             "confirm_count": confirm_n,
             "latest_batch": dict(batch) if batch else None,
             "pending_variance": pending,
+            "drift_count": drift,
+            "compare_axis": current_axis,
+            "compare_axis_label": AXIS_LABELS[current_axis],
         }
     finally:
         conn.close()

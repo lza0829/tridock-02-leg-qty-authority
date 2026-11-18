@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from app.db import connect
-from app.services.gate import assert_writable
+from app.services.gate import assert_writable, begin_write
 
 router = APIRouter(tags=["lines"])
 
@@ -68,6 +68,7 @@ def list_expects(dock_day: str | None = None):
 def add_expect(body: ExpectIn):
     conn = connect()
     try:
+        begin_write(conn)
         assert_writable(conn, body.dock_day)
         conn.execute(
             '''INSERT INTO expect_lines(doc_no, supplier_code, sku, dock_day, qty, note, created_at)
@@ -103,6 +104,7 @@ def list_receives(dock_day: str | None = None):
 def add_receive(body: ReceiveIn):
     conn = connect()
     try:
+        begin_write(conn)
         assert_writable(conn, body.dock_day)
         occurred = body.occurred_at or _now()
         conn.execute(
@@ -148,6 +150,7 @@ def list_confirms(dock_day: str | None = None):
 def add_confirm(body: ConfirmIn):
     conn = connect()
     try:
+        begin_write(conn)
         assert_writable(conn, body.dock_day)
         conn.execute(
             '''INSERT INTO confirm_lines(confirm_no, supplier_code, sku, dock_day, qty, note, created_at)

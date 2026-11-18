@@ -69,19 +69,25 @@ def matches(batch_id: int):
 
 
 @router.get("/reconcile/variances")
-def variances(batch_id: int | None = None, dock_day: str | None = None):
+def variances(batch_id: int | None = None, dock_day: str | None = None, bucket: str | None = None):
+    """差额列表：bucket 过滤主差额/旁证桶（main / expect_drift），两桶不混。"""
     conn = connect()
     try:
+        clauses = []
+        params: list = []
         if batch_id is not None:
-            rows = conn.execute(
-                "SELECT * FROM variance_rows WHERE batch_id=? ORDER BY id", (batch_id,)
-            ).fetchall()
-        elif dock_day:
-            rows = conn.execute(
-                "SELECT * FROM variance_rows WHERE dock_day=? ORDER BY id", (dock_day,)
-            ).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM variance_rows ORDER BY id DESC").fetchall()
+            clauses.append("batch_id=?")
+            params.append(batch_id)
+        if dock_day:
+            clauses.append("dock_day=?")
+            params.append(dock_day)
+        if bucket:
+            clauses.append("bucket=?")
+            params.append(bucket)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = conn.execute(
+            f"SELECT * FROM variance_rows {where} ORDER BY id", params
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()

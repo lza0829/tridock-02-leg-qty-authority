@@ -1,5 +1,7 @@
 from __future__ import annotations
+import sqlite3
 from app.db import connect
+from app.services.axis import DEFAULT_AXIS
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS settings (
@@ -43,11 +45,13 @@ CREATE TABLE IF NOT EXISTS confirm_lines (
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reconcile_batches (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   batch_no TEXT NOT NULL UNIQUE,
   dock_day TEXT NOT NULL,
+  axis TEXT NOT NULL DEFAULT 'expect_receive',
   matched_count INTEGER NOT NULL,
   variance_count INTEGER NOT NULL,
+  sidecar_count INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   sealed_at TEXT,
   note TEXT
@@ -58,9 +62,13 @@ CREATE TABLE IF NOT EXISTS match_rows (
   dock_day TEXT NOT NULL,
   supplier_code TEXT NOT NULL,
   sku TEXT NOT NULL,
-  expect_qty REAL NOT NULL,
-  receive_qty REAL NOT NULL,
-  confirm_qty REAL NOT NULL,
+  expect_qty REAL,
+  receive_qty REAL,
+  confirm_qty REAL,
+  has_expect INTEGER NOT NULL DEFAULT 0,
+  has_receive INTEGER NOT NULL DEFAULT 0,
+  has_confirm INTEGER NOT NULL DEFAULT 0,
+  side_dev REAL,
   aligned INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS variance_rows (
@@ -69,9 +77,13 @@ CREATE TABLE IF NOT EXISTS variance_rows (
   dock_day TEXT NOT NULL,
   supplier_code TEXT NOT NULL,
   sku TEXT NOT NULL,
-  expect_qty REAL NOT NULL,
-  receive_qty REAL NOT NULL,
-  confirm_qty REAL NOT NULL,
+  bucket TEXT NOT NULL DEFAULT 'main',
+  expect_qty REAL,
+  receive_qty REAL,
+  confirm_qty REAL,
+  has_expect INTEGER NOT NULL DEFAULT 0,
+  has_receive INTEGER NOT NULL DEFAULT 0,
+  has_confirm INTEGER NOT NULL DEFAULT 0,
   fate TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -87,11 +99,61 @@ CREATE TABLE IF NOT EXISTS reopen_requests (
 );
 '''
 
+# 老库列迁移（新库由 SCHEMA 直接建全）；重复列时忽略
+COLUMN_MIGRATIONS = [
+    "ALTER TABLE reconcile_batches ADD COLUMN axis TEXT NOT NULL DEFAULT 'expect_receive'",
+    "ALTER TABLE reconcile_batches ADD COLUMN sidecar_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE match_rows ADD COLUMN has_expect INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE match_rows ADD COLUMN has_receive INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE match_rows ADD COLUMN has_confirm INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE match_rows ADD COLUMN side_dev REAL",
+    "ALTER TABLE variance_rows ADD COLUMN bucket TEXT NOT NULL DEFAULT 'main'",
+    "ALTER TABLE variance_rows ADD COLUMN has_expect INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE variance_rows ADD COLUMN has_receive INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE variance_rows ADD COLUMN has_confirm INTEGER NOT NULL DEFAULT 1",
+]
+
+# 同一 dock_day 至多一个 open 批次：并发两路对账不得落下两套互相矛盾的 open 主差额
+OPEN_BATCH_UNIQUE_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_reconcile_batches_open_day "
+    "ON reconcile_batches(dock_day) WHERE status='open'"
+)
+
+
+def _dedupe_open_batches(conn: sqlite3.Connection) -> None:
+    """建唯一索引前清掉历史遗留的重复 open 批（每天保留最新一个）及其行。"""
+    dupes = conn.execute(
+        '''SELECT id FROM reconcile_batches a WHERE a.status='open' AND EXISTS (
+             SELECT 1 FROM reconcile_batches b
+             WHERE b.dock_day=a.dock_day AND b.status='open' AND b.id>a.id)'''
+    ).fetchall()
+    for r in dupes:
+        conn.execute("DELETE FROM match_rows WHERE batch_id=?", (r["id"],))
+        conn.execute("DELETE FROM variance_rows WHERE batch_id=?", (r["id"],))
+        conn.execute("DELETE FROM reconcile_batches WHERE id=?", (r["id"],))
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
+    for stmt in COLUMN_MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+    _dedupe_open_batches(conn)
+    conn.execute(OPEN_BATCH_UNIQUE_INDEX)
+    conn.execute(
+        "INSERT OR IGNORE INTO settings(key, value) VALUES ('compare_axis', ?)",
+        (DEFAULT_AXIS,),
+    )
+    conn.commit()
+
 
 def seed_if_empty() -> None:
     conn = connect()
     try:
-        conn.executescript(SCHEMA)
+        ensure_schema(conn)
         if conn.execute("SELECT COUNT(*) c FROM suppliers").fetchone()["c"]:
             return
         conn.execute("INSERT INTO settings(key, value) VALUES ('dock_day', ?)", ("2026-11-18",))
